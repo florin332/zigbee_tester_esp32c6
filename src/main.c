@@ -313,7 +313,7 @@ void app_main(void)
     fb_draw_string(4, 4,  "ZIGBEE TESTER",      c_yellow, c_black);
     fb_draw_string(4, 16, "Platforma: XIAO C6", c_white,  c_black);
     fb_draw_string(4, 28, "Driver: ST7735S",    c_white,  c_black);
-    fb_draw_string(4, 40, "Mode: SNIFFER v2",   c_cyan,   c_black);
+    fb_draw_string(4, 40, "Mode: SNIFFER",   c_cyan,   c_black);
     fb_flush();
 
     ESP_LOGI(TAG, "Display initializat. Pornesc radio...");
@@ -329,7 +329,7 @@ void app_main(void)
     while (1) {
         /* --- Zona dinamica — suprascrie cu negru ---------------- */
         fb_fill_rect(4, 56, 120, 8, c_black);
-        snprintf(buff, sizeof(buff), "Canal: %d (%u MHz)",
+        snprintf(buff, sizeof(buff), "Ch: %d %u MHz",
                  current_channel, channel_to_mhz(current_channel));
         fb_draw_string(4, 56, buff, c_white, c_black);
 
