@@ -28,9 +28,14 @@
 static const char *TAG = "main";
 static esp_lcd_panel_handle_t panel_handle = NULL;
 
-static volatile uint32_t zigbee_packet_count = 0;
-static volatile int8_t last_rssi = 0;
-static volatile uint8_t current_channel = 11;
+/* ============================================================
+   Variabile radio — volatile pentru acces ISR-safe
+   ============================================================ */
+static volatile uint32_t ieee802154_frame_count = 0;
+static volatile int8_t   last_rssi = 0;
+static volatile uint8_t  last_lqi = 0;
+static volatile uint8_t  last_rx_channel = 11;
+static volatile uint8_t  current_channel = 11;
 
 /* ============================================================
    FONT 8x8 — ASCII 32..122
@@ -132,8 +137,7 @@ const uint8_t font8x8[91][8] = {
 #include "esp_lcd_types.h"
 
 /* ============================================================
-   FRAMEBUFFER — 128 x 160 x 2 bytes = 40 KB
-   Alocat in DMA-capable memory (obligatoriu pentru SPI DMA)
+   FRAMEBUFFER DMA — 128 x 160 x 2 bytes = 40 KB
    ============================================================ */
 static uint16_t *s_fb = NULL;
 
@@ -193,11 +197,29 @@ void fb_flush(void) {
 }
 
 /* ============================================================
-   Zigbee callback
+   Frecventa 802.15.4: CH11=2405MHz ... CH26=2480MHz
    ============================================================ */
-void esp_ieee802154_receive_done(uint8_t *frame, esp_ieee802154_frame_info_t *frame_info) {
-    zigbee_packet_count++;
+static inline uint16_t channel_to_mhz(uint8_t ch) {
+    return (uint16_t)(2405 + (ch - 11) * 5);
+}
+
+/* ============================================================
+   Callback IEEE 802.15.4 RX — IRAM_ATTR (ISR-safe)
+   FOARTE IMPORTANT: apelam esp_ieee802154_receive_handle_done()
+   pentru a returna bufferul RX catre driver.
+   ============================================================ */
+void IRAM_ATTR esp_ieee802154_receive_done(
+    uint8_t *frame,
+    esp_ieee802154_frame_info_t *frame_info)
+{
+    ieee802154_frame_count++;
+
     last_rssi = frame_info->rssi;
+    last_lqi  = frame_info->lqi;
+    last_rx_channel = frame_info->channel;
+
+    /* Eliberam bufferul RX catre driver dupa procesare */
+    esp_ieee802154_receive_handle_done(frame);
 }
 
 /* ============================================================ */
@@ -211,7 +233,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    /* --- Alocare framebuffer in DMA RAM ------------------------- */
+    /* --- Alocare framebuffer DMA -------------------------------- */
     s_fb = (uint16_t *)heap_caps_malloc(
         LCD_WIDTH * LCD_HEIGHT * sizeof(uint16_t),
         MALLOC_CAP_DMA);
@@ -254,10 +276,12 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
 
-    // Pauza obligatorie dupa init (ST7735 are nevoie de timp sa iasa din Sleep)
-    vTaskDelay(pdMS_TO_TICKS(120));
+    vTaskDelay(pdMS_TO_TICKS(120));   // ST7735 iese din Sleep Out
 
-    /* --- Orientare & offset -------------------------------------
+    /* --- Offset & orientare -------------------------------------
+       Daca textul e rasturnat / oglinzit / decalat, modifica aici.
+       Valori comune: set_gap(0,0), (2,1), (2,3), (0,32)
+       --- Orientare & offset -------------------------------------
        Daca textul e rasturnat / oglinzit / decalat,
        modifica aici. Valori comune pentru ST7735 128x160:
        - set_gap(0, 0)   -> majoritatea modulelor noi
@@ -269,13 +293,11 @@ void app_main(void)
        0x00 = normal, 0xC0 = rotit 180, 0xC8 = oglinda+rotit
        ---------------------------------------------------------- */
     esp_lcd_panel_set_gap(panel_handle, 0, 0);
-
     // Decomenteaza DOAR daca imaginea e rasturnata:
     esp_lcd_panel_io_tx_param(io_handle, 0x36, (uint8_t[]){0xC0}, 1);
-
+    
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, false));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
-
     vTaskDelay(pdMS_TO_TICKS(50));
 
     /* --- Culori ------------------------------------------------- */
@@ -284,13 +306,14 @@ void app_main(void)
     uint16_t c_green  = rgb888_to_rgb565(0,   255, 0);
     uint16_t c_yellow = rgb888_to_rgb565(255, 255, 0);
     uint16_t c_red    = rgb888_to_rgb565(255, 0,   0);
+    uint16_t c_cyan   = rgb888_to_rgb565(0,   255, 255);
 
-    /* --- Primul frame — test static ----------------------------- */
+    /* --- Frame initial — text static ---------------------------- */
     fb_clear(c_black);
     fb_draw_string(4, 4,  "ZIGBEE TESTER",      c_yellow, c_black);
     fb_draw_string(4, 16, "Platforma: XIAO C6", c_white,  c_black);
-    fb_draw_string(4, 28, "Driver: ST7735",     c_white,  c_black);
-    fb_draw_string(4, 40, "Mode: SNIFFER",      c_white,  c_black);
+    fb_draw_string(4, 28, "Driver: ST7735S",    c_white,  c_black);
+    fb_draw_string(4, 40, "Mode: SNIFFER v2",   c_cyan,   c_black);
     fb_flush();
 
     ESP_LOGI(TAG, "Display initializat. Pornesc radio...");
@@ -304,28 +327,41 @@ void app_main(void)
     char buff[32];
 
     while (1) {
-        /* Sterge doar zonele dinamice (suprascrie cu negru) */
-        fb_fill_rect(4, 60, 120, 8, c_black);
-        snprintf(buff, sizeof(buff), "Canal: %d", current_channel);
-        fb_draw_string(4, 60, buff, c_white, c_black);
+        /* --- Zona dinamica — suprascrie cu negru ---------------- */
+        fb_fill_rect(4, 56, 120, 8, c_black);
+        snprintf(buff, sizeof(buff), "Canal: %d (%u MHz)",
+                 current_channel, channel_to_mhz(current_channel));
+        fb_draw_string(4, 56, buff, c_white, c_black);
 
-        fb_fill_rect(4, 72, 120, 8, c_black);
-        snprintf(buff, sizeof(buff), "Pachete: %lu", zigbee_packet_count);
-        fb_draw_string(4, 72, buff, c_green, c_black);
+        fb_fill_rect(4, 68, 120, 8, c_black);
+        snprintf(buff, sizeof(buff), "Frames: %lu", ieee802154_frame_count);
+        fb_draw_string(4, 68, buff, c_green, c_black);
 
-        fb_fill_rect(4, 84, 120, 8, c_black);
+        fb_fill_rect(4, 80, 120, 8, c_black);
         snprintf(buff, sizeof(buff), "RSSI: %d dBm", last_rssi);
-        fb_draw_string(4, 84, buff, c_green, c_black);
+        fb_draw_string(4, 80, buff, c_green, c_black);
+
+        fb_fill_rect(4, 92, 120, 8, c_black);
+        snprintf(buff, sizeof(buff), "LQI: %u", last_lqi);
+        fb_draw_string(4, 92, buff, c_green, c_black);
+
+        fb_fill_rect(4, 104, 120, 8, c_black);
+        snprintf(buff, sizeof(buff), "RX CH: %u", last_rx_channel);
+        fb_draw_string(4, 104, buff, c_yellow, c_black);
 
         /* Trimite TOT ecranul intr-o SINGURA tranzactie SPI */
         fb_flush();
 
-        current_channel++;
-        if (current_channel > 26) current_channel = 11;
-        esp_ieee802154_set_channel(current_channel);
-        esp_ieee802154_receive();
-
+        /* Asteapta 500ms pe acest canal (timp efectiv de sniffing) */
         vTaskDelay(pdMS_TO_TICKS(500));
+
+        /* Hopping: 11 -> 12 -> ... -> 26 -> 11 */
+        current_channel++;
+        if (current_channel > 26) {
+            current_channel = 11;
+        }
+        ESP_ERROR_CHECK(esp_ieee802154_set_channel(current_channel));
+        ESP_ERROR_CHECK(esp_ieee802154_receive());
     }
 }
 
