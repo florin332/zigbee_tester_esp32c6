@@ -313,55 +313,28 @@ void app_main(void)
     fb_draw_string(4, 4,  "ZIGBEE TESTER",      c_yellow, c_black);
     fb_draw_string(4, 16, "Platforma: XIAO C6", c_white,  c_black);
     fb_draw_string(4, 28, "Driver: ST7735S",    c_white,  c_black);
-    fb_draw_string(4, 40, "Mode: SNIFFER",   c_cyan,   c_black);
+    fb_draw_string(4, 40, "Mode: SNIFFER v2",   c_cyan,   c_black);
     fb_flush();
 
-    ESP_LOGI(TAG, "Display initializat. Pornesc radio...");
+    ESP_LOGI(TAG, "Display initializat. Radio DEZACTIVAT.");
 
-    /* --- Zigbee sniffer ----------------------------------------- */
-    esp_ieee802154_enable();
-    esp_ieee802154_set_promiscuous(true);
-    esp_ieee802154_set_channel(current_channel);
-    esp_ieee802154_receive();
-
+    /* --- Test display stabil — niciun cod radio --------------- */
+    uint32_t frame = 0;
     char buff[32];
 
     while (1) {
-        /* --- Zona dinamica — suprascrie cu negru ---------------- */
-        fb_fill_rect(4, 56, 120, 8, c_black);
-        snprintf(buff, sizeof(buff), "Ch: %d %u MHz",
-                 current_channel, channel_to_mhz(current_channel));
+        frame++;
+
+        fb_fill_rect(4, 56, 120, 64, c_black);
+        snprintf(buff, sizeof(buff), "Frame: %lu", frame);
         fb_draw_string(4, 56, buff, c_white, c_black);
 
-        fb_fill_rect(4, 68, 120, 8, c_black);
-        snprintf(buff, sizeof(buff), "Frames: %lu", ieee802154_frame_count);
-        fb_draw_string(4, 68, buff, c_green, c_black);
+        fb_draw_string(4, 72, "Radio OFF", c_red, c_black);
+        fb_draw_string(4, 88, "Test display", c_green, c_black);
+        fb_draw_string(4, 104, "stabil...", c_green, c_black);
 
-        fb_fill_rect(4, 80, 120, 8, c_black);
-        snprintf(buff, sizeof(buff), "RSSI: %d dBm", last_rssi);
-        fb_draw_string(4, 80, buff, c_green, c_black);
-
-        fb_fill_rect(4, 92, 120, 8, c_black);
-        snprintf(buff, sizeof(buff), "LQI: %u", last_lqi);
-        fb_draw_string(4, 92, buff, c_green, c_black);
-
-        fb_fill_rect(4, 104, 120, 8, c_black);
-        snprintf(buff, sizeof(buff), "RX CH: %u", last_rx_channel);
-        fb_draw_string(4, 104, buff, c_yellow, c_black);
-
-        /* Trimite TOT ecranul intr-o SINGURA tranzactie SPI */
         fb_flush();
-
-        /* Asteapta 500ms pe acest canal (timp efectiv de sniffing) */
         vTaskDelay(pdMS_TO_TICKS(500));
-
-        /* Hopping: 11 -> 12 -> ... -> 26 -> 11 */
-        current_channel++;
-        if (current_channel > 26) {
-            current_channel = 11;
-        }
-        ESP_ERROR_CHECK(esp_ieee802154_set_channel(current_channel));
-        ESP_ERROR_CHECK(esp_ieee802154_receive());
     }
 }
 
